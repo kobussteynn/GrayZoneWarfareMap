@@ -35,4 +35,10 @@ grayzonewarfare list --search "Landing Zone" --limit 10
 
 # Show one marker as JSON
 grayzonewarfare show --id 923
+
+# Render interactive map with all markers
+grayzonewarfare map --open
+
+# Render only key markers and save as a specific file
+grayzonewarfare map --icon key --output out/map_keys.html --open
 ```

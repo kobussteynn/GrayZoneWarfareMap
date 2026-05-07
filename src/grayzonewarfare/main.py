@@ -3,9 +3,15 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import webbrowser
 from collections import Counter
+from html import escape
 from pathlib import Path
 from typing import Any
+
+DEFAULT_MAP_IMAGE_URL = "https://gzwtacmap.com/_app/immutable/assets/ground-zero.D-6UoFn_.png"
+MAP_WIDTH_UNITS = 14000
+MAP_HEIGHT_UNITS = 8000
 
 
 def _decode_reference_payload(refs: list[Any]) -> Any:
@@ -197,6 +203,47 @@ def _build_parser() -> argparse.ArgumentParser:
     show = subparsers.add_parser("show", help="Show full marker JSON by marker id.")
     show.add_argument("--id", required=True, help="Marker id")
 
+    map_cmd = subparsers.add_parser(
+        "map",
+        help="Render markers on an interactive HTML map.",
+    )
+    map_cmd.add_argument(
+        "--source",
+        choices=["markers", "taskMarkers", "all"],
+        default="all",
+        help="Which marker source to include",
+    )
+    map_cmd.add_argument("--group", dest="group_id", help="Filter by group id")
+    map_cmd.add_argument("--icon", help="Filter by icon name")
+    map_cmd.add_argument("--faction", help="Filter by faction value")
+    map_cmd.add_argument("--search", help="Case-insensitive search in name/tooltip")
+    map_cmd.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Maximum markers to draw (0 means all)",
+    )
+    map_cmd.add_argument(
+        "--output",
+        default="map_view.html",
+        help="Output HTML path (default: map_view.html)",
+    )
+    map_cmd.add_argument(
+        "--map-image",
+        default=DEFAULT_MAP_IMAGE_URL,
+        help="Background map image URL",
+    )
+    map_cmd.add_argument(
+        "--flip-y",
+        action="store_true",
+        help="Flip marker Y axis (use if points appear vertically inverted)",
+    )
+    map_cmd.add_argument(
+        "--open",
+        action="store_true",
+        help="Open the generated HTML map in your default browser",
+    )
+
     return parser
 
 
@@ -356,6 +403,233 @@ def _run_show(rows: list[dict[str, Any]], marker_id: str) -> int:
     return 0
 
 
+def _build_map_markers(rows: list[dict[str, Any]], args: argparse.Namespace) -> list[dict[str, Any]]:
+    filtered = _filter_markers(rows, args)
+    filtered.sort(key=lambda row: (_as_text(row.get("name")).lower(), _as_text(row.get("id"))))
+
+    markers: list[dict[str, Any]] = []
+    for row in filtered:
+        lat = row.get("lat")
+        lng = row.get("lng")
+        if not isinstance(lat, (int, float)) or not isinstance(lng, (int, float)):
+            continue
+
+        marker_lat = float(lat)
+        if args.flip_y:
+            marker_lat = MAP_HEIGHT_UNITS - marker_lat
+
+        markers.append(
+            {
+                "id": _as_text(row.get("id")),
+                "name": _as_text(row.get("name")),
+                "icon": _as_text(row.get("icon")),
+                "source": _as_text(row.get("_source")),
+                "group": _as_text(row.get("_group_id")),
+                "faction": _as_text(row.get("faction")),
+                "tooltip": _as_text(row.get("tooltip")),
+                "lat": marker_lat,
+                "lng": float(lng),
+            }
+        )
+
+    if args.limit > 0:
+        markers = markers[: args.limit]
+
+    return markers
+
+
+def _render_map_html(
+    markers: list[dict[str, Any]],
+    map_image: str,
+    title: str,
+) -> str:
+    markers_json = json.dumps(markers, ensure_ascii=False)
+    image_json = json.dumps(map_image)
+    title_text = escape(title)
+    marker_count = len(markers)
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{title_text}</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    :root {{
+      --bg: #0b1118;
+      --panel: rgba(9, 17, 27, 0.86);
+      --text: #d7e0ea;
+      --muted: #8ea3b8;
+      --accent: #ff8a3d;
+    }}
+    html, body {{
+      height: 100%;
+      margin: 0;
+      background: radial-gradient(circle at 15% 10%, #111c2b 0%, var(--bg) 60%);
+      color: var(--text);
+      font-family: "Segoe UI", Tahoma, sans-serif;
+    }}
+    #app {{
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      height: 100%;
+    }}
+    #panel {{
+      padding: 16px;
+      background: var(--panel);
+      border-right: 1px solid rgba(255, 255, 255, 0.08);
+      backdrop-filter: blur(4px);
+      overflow: auto;
+    }}
+    #map {{
+      width: 100%;
+      height: 100%;
+      background: #04070b;
+    }}
+    h1 {{
+      font-size: 19px;
+      margin: 0 0 10px 0;
+      letter-spacing: 0.3px;
+    }}
+    .stat {{
+      margin: 8px 0;
+      color: var(--muted);
+      line-height: 1.4;
+      font-size: 14px;
+    }}
+    .value {{
+      color: var(--text);
+      font-weight: 600;
+    }}
+    code {{
+      color: var(--accent);
+    }}
+    .hint {{
+      margin-top: 14px;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.45;
+    }}
+    .leaflet-popup-content {{
+      min-width: 240px;
+      font-size: 13px;
+      line-height: 1.35;
+    }}
+    .popup-title {{
+      margin-bottom: 6px;
+      font-weight: 700;
+    }}
+    @media (max-width: 900px) {{
+      #app {{
+        grid-template-columns: 1fr;
+        grid-template-rows: 190px 1fr;
+      }}
+      #panel {{
+        border-right: none;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      }}
+    }}
+  </style>
+</head>
+<body>
+  <div id="app">
+    <aside id="panel">
+      <h1>{title_text}</h1>
+      <div class="stat">Loaded markers: <span class="value">{marker_count}</span></div>
+      <div class="stat">Map extent: <span class="value">{MAP_WIDTH_UNITS} x {MAP_HEIGHT_UNITS}</span></div>
+      <div class="stat">Base image: <code>{escape(map_image)}</code></div>
+      <div class="hint">
+        Controls: Mouse wheel to zoom, click-drag to pan, click a marker for details.
+      </div>
+    </aside>
+    <main id="map"></main>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const mapImageUrl = {image_json};
+    const markers = {markers_json};
+    const mapWidth = {MAP_WIDTH_UNITS};
+    const mapHeight = {MAP_HEIGHT_UNITS};
+    const bounds = [[0, 0], [mapHeight, mapWidth]];
+
+    const map = L.map("map", {{
+      crs: L.CRS.Simple,
+      minZoom: -2.5,
+      maxZoom: 2.5,
+      zoomSnap: 0.25,
+      preferCanvas: true
+    }});
+
+    const overlay = L.imageOverlay(mapImageUrl, bounds, {{ crossOrigin: "anonymous" }});
+    overlay.addTo(map);
+    map.fitBounds(bounds);
+    map.setMaxBounds(bounds);
+
+    function esc(text) {{
+      const div = document.createElement("div");
+      div.textContent = text ?? "";
+      return div.innerHTML;
+    }}
+
+    const layer = L.layerGroup().addTo(map);
+    for (const item of markers) {{
+      if (typeof item.lat !== "number" || typeof item.lng !== "number") {{
+        continue;
+      }}
+      const marker = L.circleMarker([item.lat, item.lng], {{
+        radius: 4.5,
+        fillColor: "#ff8a3d",
+        color: "#ffe8d4",
+        weight: 1,
+        opacity: 0.9,
+        fillOpacity: 0.85
+      }});
+
+      const popup = `
+        <div class="popup-title">${{esc(item.name || "Unnamed Marker")}}</div>
+        <div><strong>ID:</strong> ${{esc(item.id)}}</div>
+        <div><strong>Icon:</strong> ${{esc(item.icon)}}</div>
+        <div><strong>Source:</strong> ${{esc(item.source)}} / group ${{esc(item.group)}}</div>
+        <div><strong>Faction:</strong> ${{esc(item.faction || "-")}}</div>
+        <div><strong>Position:</strong> lat=${{item.lat.toFixed(2)}}, lng=${{item.lng.toFixed(2)}}</div>
+        <div><strong>Tooltip:</strong> ${{esc(item.tooltip || "-")}}</div>
+      `;
+      marker.bindPopup(popup, {{ maxWidth: 360 }});
+      marker.addTo(layer);
+    }}
+  </script>
+</body>
+</html>
+"""
+
+
+def _run_map(rows: list[dict[str, Any]], args: argparse.Namespace) -> int:
+    markers = _build_map_markers(rows, args)
+    if not markers:
+        print("No marker rows matched the current filters.")
+        return 1
+
+    output_path = Path(args.output)
+    if not output_path.is_absolute():
+        output_path = Path.cwd() / output_path
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    title = "Gray Zone Warfare Marker Map"
+    html = _render_map_html(markers, map_image=args.map_image, title=title)
+    output_path.write_text(html, encoding="utf-8")
+
+    print(f"Wrote map HTML with {len(markers)} markers:")
+    print(f"  {output_path}")
+
+    if args.open:
+        webbrowser.open(output_path.resolve().as_uri())
+        print("Opened map in your default browser.")
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -393,6 +667,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if command == "show":
         return _run_show(rows, args.id)
+    if command == "map":
+        map_rows = iter_markers(map_data, source=args.source)
+        return _run_map(map_rows, args)
 
     print(f"Unknown command: {command}")
     return 1

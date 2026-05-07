@@ -21,3 +21,21 @@ def test_iter_markers_returns_rows() -> None:
 def test_cli_summary_returns_success() -> None:
     assert main(["summary", "--top", "2"]) == 0
 
+
+def test_cli_map_writes_output(tmp_path: Path) -> None:
+    output = tmp_path / "map.html"
+    assert (
+        main(
+            [
+                "map",
+                "--limit",
+                "50",
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    assert output.exists()
+    content = output.read_text(encoding="utf-8")
+    assert "Gray Zone Warfare Marker Map" in content
