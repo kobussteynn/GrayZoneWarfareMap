@@ -41,4 +41,7 @@ grayzonewarfare map --open
 
 # Render only key markers and save as a specific file
 grayzonewarfare map --icon key --output out/map_keys.html --open
+
+# Disable red-zone overlay if needed
+grayzonewarfare map --no-red-zone --open
 ```

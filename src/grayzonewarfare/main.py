@@ -9,9 +9,16 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-DEFAULT_MAP_IMAGE_URL = "https://gzwtacmap.com/_app/immutable/assets/ground-zero.D-6UoFn_.png"
+DEFAULT_TILE_URL_TEMPLATE = "https://cdn.gzwtacmap.com/{map_version}/{code_name}/{z}/{x}/{y}.png"
+DEFAULT_MAP_VERSION = "0.4"
+DEFAULT_MAP_CODE_NAME = "lamang"
+DEFAULT_RED_ZONE_IMAGE_URL = "https://gzwtacmap.com/_app/immutable/assets/ground-zero.D-6UoFn_.png"
 MAP_WIDTH_UNITS = 14000
 MAP_HEIGHT_UNITS = 8000
+MAP_TILE_MIN_ZOOM = 11
+MAP_TILE_MAX_ZOOM = 19
+MAP_VIEW_MIN_ZOOM = 14
+MAP_VIEW_MAX_ZOOM = 21
 
 
 def _decode_reference_payload(refs: list[Any]) -> Any:
@@ -229,9 +236,31 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Output HTML path (default: map_view.html)",
     )
     map_cmd.add_argument(
+        "--tile-url-template",
+        default=DEFAULT_TILE_URL_TEMPLATE,
+        help="Background tile URL template",
+    )
+    map_cmd.add_argument(
+        "--map-version",
+        default=DEFAULT_MAP_VERSION,
+        help="Map tile version (default: 0.4)",
+    )
+    map_cmd.add_argument(
+        "--map-code-name",
+        default=DEFAULT_MAP_CODE_NAME,
+        help="Map code name (default: lamang)",
+    )
+    map_cmd.add_argument(
+        "--red-zone-image",
         "--map-image",
-        default=DEFAULT_MAP_IMAGE_URL,
-        help="Background map image URL",
+        dest="red_zone_image",
+        default=DEFAULT_RED_ZONE_IMAGE_URL,
+        help="Optional red-zone overlay image URL",
+    )
+    map_cmd.add_argument(
+        "--no-red-zone",
+        action="store_true",
+        help="Disable the red-zone overlay image",
     )
     map_cmd.add_argument(
         "--flip-y",
@@ -438,13 +467,21 @@ def _build_map_markers(rows: list[dict[str, Any]], args: argparse.Namespace) -> 
     return markers
 
 
+def _resolve_tile_url(template: str, map_version: str, map_code_name: str) -> str:
+    resolved = template.replace("{map_version}", map_version)
+    resolved = resolved.replace("{code_name}", map_code_name)
+    return resolved
+
+
 def _render_map_html(
     markers: list[dict[str, Any]],
-    map_image: str,
+    tile_url: str,
+    red_zone_image: str | None,
     title: str,
 ) -> str:
     markers_json = json.dumps(markers, ensure_ascii=False)
-    image_json = json.dumps(map_image)
+    tile_url_json = json.dumps(tile_url)
+    red_zone_json = "null" if red_zone_image is None else json.dumps(red_zone_image)
     title_text = escape(title)
     marker_count = len(markers)
 
@@ -454,7 +491,7 @@ def _render_map_html(
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{title_text}</title>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ol@10.6.1/ol.css" />
   <style>
     :root {{
       --bg: #0b1118;
@@ -462,6 +499,7 @@ def _render_map_html(
       --text: #d7e0ea;
       --muted: #8ea3b8;
       --accent: #ff8a3d;
+      --card: rgba(3, 8, 14, 0.92);
     }}
     html, body {{
       height: 100%;
@@ -504,6 +542,7 @@ def _render_map_html(
     }}
     code {{
       color: var(--accent);
+      word-break: break-word;
     }}
     .hint {{
       margin-top: 14px;
@@ -511,12 +550,19 @@ def _render_map_html(
       color: var(--muted);
       line-height: 1.45;
     }}
-    .leaflet-popup-content {{
-      min-width: 240px;
+    #popup {{
+      position: relative;
+      padding: 10px;
+      min-width: 220px;
+      max-width: 360px;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      background: var(--card);
+      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
       font-size: 13px;
       line-height: 1.35;
     }}
-    .popup-title {{
+    #popup .popup-title {{
       margin-bottom: 6px;
       font-weight: 700;
     }}
@@ -538,34 +584,100 @@ def _render_map_html(
       <h1>{title_text}</h1>
       <div class="stat">Loaded markers: <span class="value">{marker_count}</span></div>
       <div class="stat">Map extent: <span class="value">{MAP_WIDTH_UNITS} x {MAP_HEIGHT_UNITS}</span></div>
-      <div class="stat">Base image: <code>{escape(map_image)}</code></div>
+      <div class="stat">Base tiles: <code>{escape(tile_url)}</code></div>
+      <div class="stat">Red zone overlay: <code>{escape(red_zone_image or "disabled")}</code></div>
       <div class="hint">
-        Controls: Mouse wheel to zoom, click-drag to pan, click a marker for details.
+        Controls: mouse wheel to zoom, drag to pan, click marker for details.
       </div>
     </aside>
     <main id="map"></main>
   </div>
 
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <div id="popup" hidden></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/ol@10.6.1/dist/ol.js"></script>
   <script>
-    const mapImageUrl = {image_json};
+    const tileUrl = {tile_url_json};
+    const redZoneImageUrl = {red_zone_json};
     const markers = {markers_json};
+
     const mapWidth = {MAP_WIDTH_UNITS};
     const mapHeight = {MAP_HEIGHT_UNITS};
-    const bounds = [[0, 0], [mapHeight, mapWidth]];
+    const extent = [0, 0, mapWidth, mapHeight];
+    const viewExtent = [-3000, -3000, mapWidth + 3000, mapHeight + 3000];
 
-    const map = L.map("map", {{
-      crs: L.CRS.Simple,
-      minZoom: -2.5,
-      maxZoom: 2.5,
-      zoomSnap: 0.25,
-      preferCanvas: true
+    const layers = [];
+    const backgroundLayer = new ol.layer.Tile({{
+      source: new ol.source.XYZ({{
+        url: tileUrl,
+        crossOrigin: "anonymous",
+        minZoom: {MAP_TILE_MIN_ZOOM},
+        maxZoom: {MAP_TILE_MAX_ZOOM},
+        useInterimTilesOnError: true
+      }}),
+      zIndex: 0,
+      extent: extent
+    }});
+    layers.push(backgroundLayer);
+
+    if (redZoneImageUrl) {{
+      const redZoneLayer = new ol.layer.Image({{
+        source: new ol.source.ImageStatic({{
+          url: redZoneImageUrl,
+          imageExtent: extent,
+          crossOrigin: "anonymous"
+        }}),
+        zIndex: 1
+      }});
+      layers.push(redZoneLayer);
+    }}
+
+    const features = [];
+    for (const item of markers) {{
+      if (typeof item.lat !== "number" || typeof item.lng !== "number") {{
+        continue;
+      }}
+      const feature = new ol.Feature({{
+        geometry: new ol.geom.Point([item.lng, item.lat]),
+        markerData: item
+      }});
+      features.push(feature);
+    }}
+
+    const markerSource = new ol.source.Vector({{
+      features: features,
+      wrapX: false
     }});
 
-    const overlay = L.imageOverlay(mapImageUrl, bounds, {{ crossOrigin: "anonymous" }});
-    overlay.addTo(map);
-    map.fitBounds(bounds);
-    map.setMaxBounds(bounds);
+    const markerLayer = new ol.layer.Vector({{
+      source: markerSource,
+      zIndex: 5,
+      style: new ol.style.Style({{
+        image: new ol.style.Circle({{
+          radius: 4.4,
+          fill: new ol.style.Fill({{ color: "rgba(255, 138, 61, 0.86)" }}),
+          stroke: new ol.style.Stroke({{ color: "rgba(255, 232, 212, 0.95)", width: 1.1 }})
+        }})
+      }})
+    }});
+    layers.push(markerLayer);
+
+    const map = new ol.Map({{
+      target: "map",
+      layers: layers,
+      view: new ol.View({{
+        center: [mapWidth / 2, mapHeight / 2],
+        zoom: 15,
+        minZoom: {MAP_VIEW_MIN_ZOOM},
+        maxZoom: {MAP_VIEW_MAX_ZOOM},
+        extent: viewExtent
+      }}),
+      controls: ol.control.defaults.defaults({{ attribution: false }}),
+      interactions: ol.interaction.defaults.defaults({{
+        altShiftDragRotate: false,
+        pinchRotate: false
+      }})
+    }});
 
     function esc(text) {{
       const div = document.createElement("div");
@@ -573,21 +685,24 @@ def _render_map_html(
       return div.innerHTML;
     }}
 
-    const layer = L.layerGroup().addTo(map);
-    for (const item of markers) {{
-      if (typeof item.lat !== "number" || typeof item.lng !== "number") {{
-        continue;
-      }}
-      const marker = L.circleMarker([item.lat, item.lng], {{
-        radius: 4.5,
-        fillColor: "#ff8a3d",
-        color: "#ffe8d4",
-        weight: 1,
-        opacity: 0.9,
-        fillOpacity: 0.85
-      }});
+    const popupEl = document.getElementById("popup");
+    const popup = new ol.Overlay({{
+      element: popupEl,
+      positioning: "bottom-left",
+      offset: [10, -10],
+      stopEvent: false
+    }});
+    map.addOverlay(popup);
 
-      const popup = `
+    map.on("singleclick", (event) => {{
+      const feature = map.forEachFeatureAtPixel(event.pixel, (f) => f);
+      if (!feature) {{
+        popup.setPosition(undefined);
+        popupEl.hidden = true;
+        return;
+      }}
+      const item = feature.get("markerData");
+      popupEl.innerHTML = `
         <div class="popup-title">${{esc(item.name || "Unnamed Marker")}}</div>
         <div><strong>ID:</strong> ${{esc(item.id)}}</div>
         <div><strong>Icon:</strong> ${{esc(item.icon)}}</div>
@@ -596,9 +711,17 @@ def _render_map_html(
         <div><strong>Position:</strong> lat=${{item.lat.toFixed(2)}}, lng=${{item.lng.toFixed(2)}}</div>
         <div><strong>Tooltip:</strong> ${{esc(item.tooltip || "-")}}</div>
       `;
-      marker.bindPopup(popup, {{ maxWidth: 360 }});
-      marker.addTo(layer);
-    }}
+      popup.setPosition(feature.getGeometry().getCoordinates());
+      popupEl.hidden = false;
+    }});
+
+    map.on("pointermove", (event) => {{
+      if (event.dragging) {{
+        return;
+      }}
+      const hit = map.hasFeatureAtPixel(event.pixel);
+      map.getTargetElement().style.cursor = hit ? "pointer" : "";
+    }});
   </script>
 </body>
 </html>
@@ -616,12 +739,26 @@ def _run_map(rows: list[dict[str, Any]], args: argparse.Namespace) -> int:
         output_path = Path.cwd() / output_path
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    tile_url = _resolve_tile_url(
+        args.tile_url_template,
+        map_version=args.map_version,
+        map_code_name=args.map_code_name,
+    )
+    red_zone_image = None if args.no_red_zone else args.red_zone_image
+
     title = "Gray Zone Warfare Marker Map"
-    html = _render_map_html(markers, map_image=args.map_image, title=title)
+    html = _render_map_html(
+        markers,
+        tile_url=tile_url,
+        red_zone_image=red_zone_image,
+        title=title,
+    )
     output_path.write_text(html, encoding="utf-8")
 
     print(f"Wrote map HTML with {len(markers)} markers:")
     print(f"  {output_path}")
+    print(f"Base tiles: {tile_url}")
+    print(f"Red-zone overlay: {red_zone_image or 'disabled'}")
 
     if args.open:
         webbrowser.open(output_path.resolve().as_uri())
