@@ -1,4 +1,4 @@
-# GrayZoneWarfare
+# GrayZoneWarfareMap
 
 Python project scaffold for working with `markers.json`.
 
@@ -17,4 +17,3 @@ pytest
 ```powershell
 grayzonewarfare
 ```
-
