@@ -382,7 +382,7 @@ def main(argv: list[str] | None = None) -> int:
 
     command = args.command or "summary"
     if command == "summary":
-        _run_summary(map_data, rows, top=args.top)
+        _run_summary(map_data, rows, top=getattr(args, "top", 10))
         return 0
     if command == "groups":
         _run_groups(map_data, source=args.source, limit=args.limit)
